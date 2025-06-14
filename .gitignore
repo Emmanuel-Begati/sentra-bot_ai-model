@@ -1,0 +1,15 @@
+models/
+.env
+venv/
+data/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.db
+*.sqlite3
+*.log
+*.csv
+*.tsv
+*.pt
+*.pth
