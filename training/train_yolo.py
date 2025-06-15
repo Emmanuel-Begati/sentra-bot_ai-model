@@ -20,8 +20,8 @@ import glob
 torch.backends.cudnn.benchmark = True
 
 from config import (
-    DATA_DIR, MODELS_DIR, YOLO_MODEL_SIZE, 
-    IMAGE_SIZE, BATCH_SIZE, EPOCHS, DEVICE
+    CONSOLIDATED_DATASET_DIR, DATASET_DIR, MODELS_DIR, YOLO_MODEL_SIZE, 
+    IMAGE_SIZE, BATCH_SIZE, EPOCHS, DEVICE, TRAINING_CONFIG
 )
 
 # Enhanced GPU detection and configuration
@@ -89,41 +89,50 @@ def on_train_epoch_end(trainer):
 
 
 class YOLOTrainer:
-    """YOLOv8 model trainer with advanced features"""
+    """YOLOv8 model trainer optimized for laptop"""
     
-    def __init__(self, data_yaml_path: str, model_size: str = 'yolov8s.pt', resume_from: str = None):
+    def __init__(self, data_yaml_path: str = None, model_size: str = None, resume_from: str = None):
+        # Auto-detect consolidated dataset
+        if data_yaml_path is None:
+            if (CONSOLIDATED_DATASET_DIR / "data.yaml").exists():
+                data_yaml_path = str(CONSOLIDATED_DATASET_DIR / "data.yaml")
+                logger.info("Using consolidated dataset")
+            else:
+                data_yaml_path = str(DATASET_DIR / "data.yaml")
+                logger.info("Using original dataset")
+        
         self.data_yaml_path = Path(data_yaml_path)
-        self.model_size = model_size
+        self.model_size = model_size or YOLO_MODEL_SIZE
         self.models_dir = Path(MODELS_DIR)
         self.models_dir.mkdir(exist_ok=True)
         
-        # Use detected device instead of config device
+        # Use detected device
         self.device = DETECTED_DEVICE
         
         # Resume configuration
         self.resume_from = resume_from
         self.last_checkpoint = self._find_last_checkpoint() if resume_from else None
         
-        # Training configuration
+        # Training configuration optimized for laptop
         self.config = {
-            'model_size': model_size,
+            'model_size': self.model_size,
             'epochs': EPOCHS,
             'batch_size': BATCH_SIZE,
             'image_size': IMAGE_SIZE,
-            'device': self.device,  # Use detected device
+            'device': self.device,
             'data_yaml': str(self.data_yaml_path),
             'timestamp': datetime.now().isoformat(),
-            'resume_from': self.resume_from,
-            'last_checkpoint': str(self.last_checkpoint) if self.last_checkpoint else None,
+            'resume_from': resume_from,
+            'environment': 'laptop',
+            'dataset_type': 'consolidated' if 'consolidated' in str(self.data_yaml_path) else 'original'
         }
         
         # Validate data yaml exists
         if not self.data_yaml_path.exists():
             raise FileNotFoundError(f"Data YAML not found: {self.data_yaml_path}")
         
-        # Add progress tracking
-        self.progress_bar = None
-        self.current_epoch = 0
+        # Load and display dataset info
+        self._display_dataset_info()
 
     def _find_last_checkpoint(self) -> Path:
         """Find the most recent checkpoint to resume from"""
@@ -203,52 +212,82 @@ class YOLOTrainer:
             logger.error(f"Error setting up model: {e}")
             raise
 
+    def _display_dataset_info(self):
+        """Display information about the dataset being used"""
+        try:
+            with open(self.data_yaml_path, 'r') as f:
+                data_config = yaml.safe_load(f)
+            
+            num_classes = data_config.get('nc', 0)
+            class_names = data_config.get('names', [])
+            
+            print(f"📊 Dataset Information:")
+            print(f"   - Classes: {num_classes}")
+            print(f"   - Dataset type: {self.config['dataset_type']}")
+            print(f"   - Model: {self.model_size}")
+            print(f"   - Sample classes: {class_names[:10]}{'...' if len(class_names) > 10 else ''}")
+            
+            # Show consolidation info if available
+            if self.config['dataset_type'] == 'consolidated':
+                mapping_file = self.data_yaml_path.parent / "consolidation_mapping.json"
+                if mapping_file.exists():
+                    with open(mapping_file, 'r') as f:
+                        mapping_data = json.load(f)
+                    original_classes = len(mapping_data.get('original_classes', []))
+                    print(f"   - Original classes: {original_classes} → {num_classes} (consolidated)")
+                    
+        except Exception as e:
+            logger.warning(f"Could not display dataset info: {e}")
+
     def train(self, 
               resume: bool = False,
-              patience: int = 50,
-              save_period: int = 5,
+              patience: int = None,
+              save_period: int = None,
               val_split: float = 0.2,
               augment: bool = True) -> Path:
-        """
-        Train YOLOv8 model with comprehensive progress tracking and resume capability
-        """
+        """Train YOLOv8 model optimized for laptop"""
+        
+        # Use config defaults if not specified
+        patience = patience or TRAINING_CONFIG.get('patience', 25)
+        save_period = save_period or TRAINING_CONFIG.get('save_period', 5)
+        
+        # Get training parameters from config
+        training_epochs = self.config.get('epochs', EPOCHS)
+        training_batch_size = self.config.get('batch_size', BATCH_SIZE)
+        
         try:
-            # Setup model with progress
             model = self.setup_model()
             
             # Determine if we're resuming
             is_resuming = self.last_checkpoint is not None
             
-            # Create experiment directory with progress
+            # Create experiment directory
             with tqdm(desc="📁 Setting up experiment", unit="step") as pbar:
                 if is_resuming:
-                    # Extract experiment name from checkpoint path
                     experiment_name = self.last_checkpoint.parent.parent.name
                     experiment_dir = self.last_checkpoint.parent.parent
                     logger.info(f"Resuming experiment: {experiment_name}")
                 else:
-                    experiment_name = f"crop_health_{self.model_size}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                    experiment_name = f"crop_health_{self.model_size.replace('.pt', '')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
                     experiment_dir = self.models_dir / experiment_name
                     experiment_dir.mkdir(exist_ok=True)
                     logger.info(f"Starting new experiment: {experiment_name}")
                 
                 pbar.update(1)
                 
-                # Save/update training configuration
+                # Save training configuration
                 config_file = experiment_dir / "training_config.json"
                 with open(config_file, 'w') as f:
                     json.dump(self.config, f, indent=2)
                 pbar.update(1)
-                
-                logger.info(f"Experiment directory: {experiment_dir}")
             
-            # Training arguments with explicit device setting
+            # Training arguments optimized for laptop
             train_args = {
                 'data': str(self.data_yaml_path),
-                'epochs': EPOCHS,
-                'batch': BATCH_SIZE,
+                'epochs': training_epochs,
+                'batch': training_batch_size,
                 'imgsz': IMAGE_SIZE,
-                'device': self.device,  # Use detected device
+                'device': self.device,
                 'project': str(self.models_dir),
                 'name': experiment_name,
                 'exist_ok': True,
@@ -257,71 +296,57 @@ class YOLOTrainer:
                 'val': True,
                 'plots': True,
                 'verbose': True,
-                'amp': True if self.device == 'cuda' else False,  # AMP only for CUDA
-                'cache': True,  # Don't cache images (memory optimization)
-                'rect': False,  # Rectangular training for faster training
-                'resume': is_resuming,  # Enable resume if checkpoint found
-                'optimizer': 'AdamW',
-                'lr0': 0.001,
+                'amp': TRAINING_CONFIG.get('amp', True),
+                'cache': TRAINING_CONFIG.get('cache', False),
+                'rect': TRAINING_CONFIG.get('rect', True),
+                'resume': is_resuming,
+                'optimizer': TRAINING_CONFIG.get('optimizer', 'SGD'),
+                'lr0': TRAINING_CONFIG.get('lr0', 0.01),
                 'lrf': 0.01,
                 'momentum': 0.937,
                 'weight_decay': 0.0005,
-                'warmup_epochs': 3,
+                'warmup_epochs': TRAINING_CONFIG.get('warmup_epochs', 2),
                 'warmup_momentum': 0.8,
                 'warmup_bias_lr': 0.1,
+                'workers': 4,  # Laptop-optimized worker count
+                # Laptop-optimized hyperparameters
                 'box': 7.5,
                 'cls': 0.5,
                 'dfl': 1.5,
-                'pose': 12.0,
-                'kobj': 1.0,
-                'label_smoothing': 0.0,
-                'nbs': 64,
                 'hsv_h': 0.015,
                 'hsv_s': 0.7,
                 'hsv_v': 0.4,
                 'degrees': 0.0,
                 'translate': 0.1,
                 'scale': 0.5,
-                'shear': 0.0,
-                'perspective': 0.0,
-                'flipud': 0.0,
                 'fliplr': 0.5,
                 'mosaic': 1.0,
                 'mixup': 0.0,
-                'copy_paste': 0.0,
-                'workers': 4,  # Number of data loading workers
             }
             
-            # Log device info before training
-            if is_resuming:
-                print(f"\n🔄 RESUMING training from checkpoint on {self.device.upper()}...")
-                print(f"📂 Checkpoint: {self.last_checkpoint}")
-            else:
-                print(f"\n🚀 Starting NEW training for {EPOCHS} epochs on {self.device.upper()}...")
+            print(f"\n🚀 Starting LAPTOP training with {self.model_size}...")
+            print(f"📊 Dataset: {self.config['dataset_type']} ({self.data_yaml_path})")
+            print(f"🔧 Epochs: {training_epochs}, Batch: {training_batch_size}, Device: {self.device.upper()}")
+            print(f"💾 Memory optimized: cache={train_args['cache']}, rect={train_args['rect']}")
             
-            if self.device == 'cuda':
-                print(f"🎮 GPU: {torch.cuda.get_device_name(0)}")
-                print(f"🎮 CUDA Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f}GB")
-            
-            # Add callback to model
+            # Add callback
             model.add_callback('on_train_epoch_end', on_train_epoch_end)
             
-            # Initialize epoch progress bar
-            self.epoch_pbar = tqdm(total=EPOCHS, desc="🏃 Training Progress", unit="epoch")
+            # Initialize progress tracking
+            self.epoch_pbar = tqdm(total=training_epochs, desc="🏃 Training Progress", unit="epoch")
             
-            logger.info("Beginning model training...")
+            logger.info("Beginning laptop-optimized model training...")
             results = model.train(**train_args)
             
             # Close progress bar
             self.epoch_pbar.close()
             
-            # Process results with progress
+            # Process results
             with tqdm(desc="💾 Saving results", unit="step") as pbar:
-                # Get best model path
                 best_model_path = Path(results.save_dir) / "weights" / "best.pt"
                 pbar.update(1)
                 
-                # Copy best model to main models directory
+                # Copy best model with descriptive name
                 final_model_path = self.models_dir / f"{experiment_name}_best.pt"
                 if best_model_path.exists():
                     import shutil
@@ -333,7 +358,7 @@ class YOLOTrainer:
                 self._save_training_summary(experiment_dir, results)
                 pbar.update(1)
             
-            logger.info("Training completed successfully!")
+            logger.info("Laptop training completed successfully!")
             return final_model_path
             
         except Exception as e:
@@ -658,79 +683,88 @@ def parse_arguments():
 
 
 def main():
-    """Main training function with comprehensive progress tracking and resume capability"""
+    """Main training function optimized for laptop"""
     try:
-        # Parse command line arguments
         args = parse_arguments()
         
-        print("🌱 CROP HEALTH MONITORING - YOLO TRAINING PIPELINE")
+        print("🌱 CROP HEALTH MONITORING - LAPTOP TRAINING PIPELINE")
         print("=" * 60)
         
-        # Override config with command line arguments if provided
-        global EPOCHS, BATCH_SIZE, YOLO_MODEL_SIZE
-        if args.epochs:
-            EPOCHS = args.epochs
-            print(f"🔧 Epochs overridden: {EPOCHS}")
-        if args.batch_size:
-            BATCH_SIZE = args.batch_size
-            print(f"🔧 Batch size overridden: {BATCH_SIZE}")
-        if args.model_size:
-            YOLO_MODEL_SIZE = args.model_size
-            print(f"🔧 Model size overridden: {YOLO_MODEL_SIZE}")
+        # Get current configuration values before override
+        current_epochs = EPOCHS
+        current_batch_size = BATCH_SIZE
+        current_model_size = YOLO_MODEL_SIZE
         
-        # Display device information
+        print(f"🔧 Optimized for: Laptop training with {current_model_size}")
+        
+        # Override config with command line arguments
+        if args.epochs:
+            current_epochs = args.epochs
+            print(f"🔧 Epochs overridden: {current_epochs}")
+        if args.batch_size:
+            current_batch_size = args.batch_size
+            print(f"🔧 Batch size overridden: {current_batch_size}")
+        if args.model_size:
+            current_model_size = args.model_size
+            print(f"🔧 Model size overridden: {current_model_size}")
+        
         print(f"🎮 Training Device: {DETECTED_DEVICE.upper()}")
         if DETECTED_DEVICE == 'cuda':
             print(f"🎮 GPU: {torch.cuda.get_device_name(0)}")
-            print(f"🎮 PyTorch CUDA: {torch.version.cuda}")
             print(f"🎮 GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f}GB")
         
-        # Resume information
         if args.resume:
             print(f"🔄 Resume mode: {args.resume}")
         
         print("=" * 60)
         
-        # Check if merged dataset exists
+        # Check for consolidated dataset
         with tqdm(desc="🔍 Checking dataset", unit="step") as pbar:
-            data_yaml = DATA_DIR / "data.yaml"
-            if not data_yaml.exists():
-                logger.error(f"Dataset not found: {data_yaml}")
-                logger.info("Please run dataset merger first: python utils/dataset_merger.py")
+            consolidated_yaml = CONSOLIDATED_DATASET_DIR / "data.yaml"
+            original_yaml = DATASET_DIR / "data.yaml"
+            
+            if consolidated_yaml.exists():
+                data_yaml = consolidated_yaml
+                print("✅ Using consolidated dataset")
+            elif original_yaml.exists():
+                data_yaml = original_yaml
+                print("⚠️ Using original dataset (run consolidation for better results)")
+            else:
+                logger.error("No dataset found. Please run dataset consolidation first.")
                 return 1
             pbar.update(1)
         
-        # Initialize trainer with resume capability
-        trainer = YOLOTrainer(data_yaml, YOLO_MODEL_SIZE, resume_from=args.resume)
+        # Initialize trainer with current values
+        trainer = YOLOTrainer(str(data_yaml), current_model_size, resume_from=args.resume)
+        
+        # Update trainer config with override values
+        trainer.config['epochs'] = current_epochs
+        trainer.config['batch_size'] = current_batch_size
+        trainer.config['model_size'] = current_model_size
         
         # Start training
-        if args.resume:
-            logger.info("Resuming YOLOv8 training for crop health monitoring...")
-        else:
-            logger.info("Starting YOLOv8 training for crop health monitoring...")
-        
+        logger.info("Starting laptop-optimized YOLOv8 training...")
         best_model_path = trainer.train()
         
         # Validate the trained model
         logger.info("Validating trained model...")
         metrics = trainer.validate_model(best_model_path)
         
-        # Comprehensive evaluation
-        logger.info("Running comprehensive evaluation...")
+        # Quick evaluation (laptop-optimized)
+        logger.info("Running evaluation...")
         eval_results = trainer.comprehensive_evaluation(best_model_path)
         
-        # Export model to different formats
+        # Export model
         logger.info("Exporting model...")
-        exported = trainer.export_model(best_model_path)
+        exported = trainer.export_model(best_model_path, formats=['onnx'])
         
         # Print final summary
-        print("\n🎉 TRAINING PIPELINE COMPLETED SUCCESSFULLY!")
+        print("\n🎉 LAPTOP TRAINING COMPLETED!")
         print("=" * 60)
         print(f"📁 Best model: {best_model_path}")
         print(f"📊 mAP50: {metrics.get('mAP50', 'N/A'):.4f}")
         print(f"📊 mAP50-95: {metrics.get('mAP50-95', 'N/A'):.4f}")
         print(f"🔄 Exported formats: {list(exported.keys())}")
-        print(f"📋 Evaluation report: comprehensive_evaluation.json")
         print("=" * 60)
         
         return 0

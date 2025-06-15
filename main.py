@@ -1,44 +1,37 @@
 """
-FastAPI Backend for Smart Crop Health Monitoring System
+Simplified FastAPI Backend for Crop Health Monitoring
 """
 
-import os
-import uuid
 import logging
 from datetime import datetime
-from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import List, Optional
 import json
+import uuid
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks
+from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import uvicorn
 from PIL import Image
 import io
-import numpy as np
 
-from utils.plantnet_api import PlantNetAPI
-from utils.health_scorer import HealthScorer, SensorData, DetectionResult, HealthAssessment
 from utils.yolo_inference import YOLOInference
-from config import API_HOST, API_PORT, MODELS_DIR, LOG_FILE
+from utils.health_scorer import HealthScorer, DetectionResult, SensorData
+from utils.rag_agent import SimpleRAGAgent
+from utils.plantnet_api import PlantNetAPI
+from config import API_HOST, API_PORT, CONSOLIDATED_DATASET_DIR, DATASET_DIR
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Create logs directory
-LOG_FILE.parent.mkdir(exist_ok=True)
-
-# Initialize FastAPI app
+# Initialize FastAPI
 app = FastAPI(
-    title="Smart Crop Health Monitoring API",
-    description="AI-powered crop health analysis with disease detection and farming advice",
+    title="Crop Health Monitoring API",
+    description="AI-powered crop health analysis",
     version="1.0.0"
 )
 
-# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -48,11 +41,12 @@ app.add_middleware(
 )
 
 # Initialize services
-plantnet_api = PlantNetAPI()
+yolo_inference = None
 health_scorer = HealthScorer()
-yolo_inference = None  # Will be initialized when needed
+rag_agent = SimpleRAGAgent()
+plantnet_api = PlantNetAPI()
 
-# In-memory storage for predictions (in production, use a database)
+# In-memory storage
 predictions_store = {}
 
 
@@ -62,140 +56,131 @@ class SensorDataModel(BaseModel):
     humidity: Optional[float] = None
     soil_moisture: Optional[float] = None
     ph: Optional[float] = None
-    light_intensity: Optional[float] = None
-    timestamp: Optional[str] = None
 
 
-class PredictionRequest(BaseModel):
-    sensor_data: Optional[SensorDataModel] = None
-    location: Optional[str] = None
-    crop_type: Optional[str] = None
+class PlantIdentificationModel(BaseModel):
+    scientific_name: str
+    common_names: List[str]
+    primary_common_name: str
+    family: str
+    genus: str
+    score: float
+    confidence: str
 
 
-class PlantIdentificationResponse(BaseModel):
-    success: bool
-    plant_id: Optional[str] = None
-    scientific_name: Optional[str] = None
-    common_name: Optional[str] = None
-    confidence: Optional[float] = None
-    all_results: Optional[List[Dict]] = None
-
-
-class HealthAnalysisResponse(BaseModel):
+class HealthResponse(BaseModel):
     prediction_id: str
     overall_health: float
+    disease_score: float
+    environmental_score: float
     risk_level: str
     confidence: float
-    detected_issues: List[Dict]
-    disease_classification: Dict  # New field for disease classification
-    environmental_analysis: Dict
+    detected_diseases: List[dict]
     recommendations: List[str]
+    plant_identification: Optional[PlantIdentificationModel] = None
     timestamp: str
 
 
 # Startup event
 @app.on_event("startup")
 async def startup_event():
-    """Initialize services on startup"""
+    """Initialize services with consolidated dataset support"""
     global yolo_inference
     
     try:
-        logger.info("Initializing YOLO inference engine...")
-        from utils.yolo_inference import YOLOInference
+        # Try to load model trained on consolidated dataset first
         yolo_inference = YOLOInference()
-        logger.info("YOLO inference engine initialized successfully")
+        logger.info("YOLO inference initialized")
+        
+        # Log dataset information
+        consolidated_yaml = CONSOLIDATED_DATASET_DIR / "data.yaml"
+        original_yaml = DATASET_DIR / "data.yaml"
+        
+        if consolidated_yaml.exists():
+            logger.info("✅ Consolidated dataset available")
+            try:
+                import yaml
+                with open(consolidated_yaml, 'r') as f:
+                    data = yaml.safe_load(f)
+                logger.info(f"📊 Model trained on {data.get('nc', 'unknown')} consolidated classes")
+            except Exception as e:
+                logger.warning(f"Could not read consolidated dataset info: {e}")
+        elif original_yaml.exists():
+            logger.info("⚠️ Using original dataset (consider consolidation)")
+        else:
+            logger.warning("❌ No dataset configuration found")
+            
     except Exception as e:
-        logger.error(f"Failed to initialize YOLO inference: {e}")
-        logger.warning("Disease detection will not be available")
+        logger.error(f"Failed to initialize YOLO: {e}")
+        yolo_inference = None
+    
+    # Test PlantNet API
+    if plantnet_api.api_key:
+        logger.info("PlantNet API initialized")
+    else:
+        logger.warning("PlantNet API key not configured")
 
 
-# Health check endpoint
+# Health check with dataset info
 @app.get("/health")
 async def health_check():
-    """API health check"""
+    """API health check with dataset information"""
+    # Check dataset status
+    dataset_info = {
+        "consolidated_available": (CONSOLIDATED_DATASET_DIR / "data.yaml").exists(),
+        "original_available": (DATASET_DIR / "data.yaml").exists(),
+        "type": "unknown"
+    }
+    
+    if dataset_info["consolidated_available"]:
+        dataset_info["type"] = "consolidated"
+        try:
+            import yaml
+            with open(CONSOLIDATED_DATASET_DIR / "data.yaml", 'r') as f:
+                data = yaml.safe_load(f)
+            dataset_info["classes"] = data.get('nc', 0)
+        except:
+            pass
+    elif dataset_info["original_available"]:
+        dataset_info["type"] = "original"
+        try:
+            import yaml
+            with open(DATASET_DIR / "data.yaml", 'r') as f:
+                data = yaml.safe_load(f)
+            dataset_info["classes"] = data.get('nc', 0)
+        except:
+            pass
+    
     return {
         "status": "healthy",
-        "timestamp": datetime.now().isoformat(),
         "services": {
             "yolo_inference": yolo_inference is not None,
-            "plantnet_api": bool(plantnet_api.api_key),
-            "health_scorer": True
-        }
+            "health_scorer": True,
+            "rag_agent": True,
+            "plantnet_api": plantnet_api.api_key is not None
+        },
+        "dataset": dataset_info,
+        "timestamp": datetime.now().isoformat()
     }
 
 
-# Plant identification endpoint
-@app.post("/identify-plant", response_model=PlantIdentificationResponse)
-async def identify_plant(image: UploadFile = File(...)):
-    """Identify plant species using PlantNet API"""
-    try:
-        # Validate image file
-        if not image.content_type.startswith('image/'):
-            raise HTTPException(status_code=400, detail="File must be an image")
-        
-        # Read image data
-        image_data = await image.read()
-        
-        # Call PlantNet API
-        logger.info(f"Identifying plant from image: {image.filename}")
-        result = plantnet_api.identify_plant(image_data)
-        
-        if not result or not result.get('success'):
-            return PlantIdentificationResponse(
-                success=False,
-                plant_id=None,
-                scientific_name=None,
-                common_name=None,
-                confidence=None
-            )
-        
-        best_match = result.get('best_match')
-        if not best_match:
-            return PlantIdentificationResponse(success=False)
-        
-        # Generate plant ID
-        plant_id = str(uuid.uuid4())
-        
-        return PlantIdentificationResponse(
-            success=True,
-            plant_id=plant_id,
-            scientific_name=best_match.get('scientific_name'),
-            common_name=best_match.get('primary_common_name'),
-            confidence=best_match.get('score'),
-            all_results=result.get('all_results', [])
-        )
-        
-    except Exception as e:
-        logger.error(f"Plant identification error: {e}")
-        raise HTTPException(status_code=500, detail=f"Plant identification failed: {str(e)}")
-
-
 # Main prediction endpoint
-@app.post("/predict", response_model=HealthAnalysisResponse)
+@app.post("/predict", response_model=HealthResponse)
 async def predict_crop_health(
-    background_tasks: BackgroundTasks,
     image: UploadFile = File(...),
     sensor_data: Optional[str] = None,
-    location: Optional[str] = None,
-    crop_type: Optional[str] = None
+    include_plant_id: bool = True
 ):
-    """
-    Analyze crop health from image and sensor data
-    
-    Args:
-        image: Crop image file
-        sensor_data: JSON string of sensor readings
-        location: Geographic location (optional)
-        crop_type: Known crop type (optional)
-    """
+    """Analyze crop health from image and sensor data"""
     try:
         # Generate prediction ID
         prediction_id = str(uuid.uuid4())
         
-        # Validate and read image
+        # Validate image
         if not image.content_type.startswith('image/'):
             raise HTTPException(status_code=400, detail="File must be an image")
         
+        # Read and process image
         image_data = await image.read()
         pil_image = Image.open(io.BytesIO(image_data))
         
@@ -208,110 +193,73 @@ async def predict_crop_health(
             except Exception as e:
                 logger.warning(f"Invalid sensor data: {e}")
         
-        # Step 1: Identify plant species (if not provided)
-        plant_species = crop_type
-        if not plant_species and plantnet_api.api_key:
-            logger.info("Attempting plant identification...")
-            plant_result = plantnet_api.identify_plant(image_data)
-            if plant_result and plant_result.get('success'):
-                best_match = plant_result.get('best_match')
-                if best_match and best_match.get('score', 0) > 0.3:
-                    plant_species = best_match.get('primary_common_name')
-                    logger.info(f"Identified plant: {plant_species}")
-        
-        # Step 2: Run disease/pest detection
+        # Run disease detection
         detections = []
-        disease_classification = {
-            'total_detections': 0,
-            'disease_types': {},
-            'severity_levels': {},
-            'highest_confidence': 0.0,
-            'primary_disease': None
-        }
-        
         if yolo_inference:
-            logger.info("Running YOLO inference for disease/pest detection...")
             detection_results = yolo_inference.predict(pil_image)
             
-            # Convert to DetectionResult objects and analyze classifications
-            disease_types = {}
-            severity_levels = {}
-            highest_conf = 0.0
-            primary_disease = None
-            
             for detection in detection_results:
-                # Convert numpy types to Python types for serialization
-                detection_obj = DetectionResult(
-                    class_name=detection.get('class_name', ''),
-                    confidence=float(detection.get('confidence', 0.0)),
-                    bbox=tuple(float(x) for x in detection.get('bbox', (0, 0, 0, 0)))
+                det_obj = DetectionResult(
+                    class_name=detection['class_name'],
+                    confidence=detection['confidence'],
+                    bbox=detection['bbox'],
+                    area=detection['area']
                 )
-                detections.append(detection_obj)
-                
-                # Track disease classification
-                disease_type = detection.get('disease_type', 'unknown')
-                severity = detection.get('severity', 'unknown')
-                conf = float(detection.get('confidence', 0.0))
-                
-                disease_types[disease_type] = disease_types.get(disease_type, 0) + 1
-                severity_levels[severity] = severity_levels.get(severity, 0) + 1
-                
-                if conf > highest_conf:
-                    highest_conf = conf
-                    primary_disease = detection.get('class_name', '')
-            
-            disease_classification = {
-                'total_detections': len(detection_results),
-                'disease_types': disease_types,
-                'severity_levels': severity_levels,
-                'highest_confidence': float(highest_conf),
-                'primary_disease': primary_disease
-            }
-            
-        else:
-            logger.warning("YOLO inference not available")
+                detections.append(det_obj)
         
-        # Step 3: Calculate health score
-        logger.info("Calculating crop health score...")
+        # Run plant identification
+        plant_identification = None
+        if include_plant_id and plantnet_api.api_key:
+            try:
+                logger.info("Starting plant identification...")
+                plant_result = plantnet_api.identify_plant(image_data, organs=["auto"])  # Changed from ["leaf"] to ["auto"]
+                
+                if plant_result and plant_result.get('success', False) and plant_result.get('best_match'):
+                    best_match = plant_result['best_match']
+                    plant_identification = PlantIdentificationModel(
+                        scientific_name=best_match['scientific_name'],
+                        common_names=best_match['common_names'],
+                        primary_common_name=best_match['primary_common_name'],
+                        family=best_match['family'],
+                        genus=best_match['genus'],
+                        score=best_match['score'],
+                        confidence=best_match['confidence']
+                    )
+                    logger.info(f"Plant identified: {best_match['primary_common_name']} (confidence: {best_match['confidence']})")
+                else:
+                    logger.warning("Plant identification returned no valid results")
+                    
+            except Exception as e:
+                logger.warning(f"Plant identification failed: {e}")
+
+        
+        # Calculate health score
         health_assessment = health_scorer.calculate_health_score(
             detections=detections,
-            sensor_data=sensor_obj,
-            plant_species=plant_species
+            sensor_data=sensor_obj
         )
         
-        # Step 4: Store prediction for later retrieval
+        # Store prediction
         prediction_data = {
             'prediction_id': prediction_id,
             'timestamp': datetime.now().isoformat(),
-            'plant_species': plant_species,
-            'location': location,
             'health_assessment': health_assessment,
-            'disease_classification': disease_classification,
-            'image_filename': image.filename,
-            'sensor_data': sensor_obj.__dict__ if sensor_obj else None
+            'plant_identification': plant_identification,
+            'image_filename': image.filename
         }
-        
         predictions_store[prediction_id] = prediction_data
         
-        # Step 5: Log prediction (background task)
-        background_tasks.add_task(log_prediction, prediction_data)
-        
         # Prepare response
-        response = HealthAnalysisResponse(
+        response = HealthResponse(
             prediction_id=prediction_id,
-            overall_health=float(health_assessment.overall_health),
+            overall_health=health_assessment.overall_health,
+            disease_score=health_assessment.disease_score,
+            environmental_score=health_assessment.environmental_score,
             risk_level=health_assessment.risk_level,
-            confidence=float(health_assessment.confidence),
-            detected_issues=[
-                {
-                    'class_name': d.class_name,
-                    'confidence': float(d.confidence),
-                    'bbox': tuple(float(x) for x in d.bbox)
-                } for d in health_assessment.detected_issues
-            ],
-            disease_classification=disease_classification,
-            environmental_analysis=health_assessment.sensor_analysis,
+            confidence=health_assessment.confidence,
+            detected_diseases=health_assessment.detected_issues,
             recommendations=health_assessment.recommendations,
+            plant_identification=plant_identification,
             timestamp=prediction_data['timestamp']
         )
         
@@ -323,45 +271,78 @@ async def predict_crop_health(
         raise HTTPException(status_code=500, detail=f"Prediction failed: {str(e)}")
 
 
-# Get detailed health analysis
-@app.get("/health/{prediction_id}")
-async def get_health_analysis(prediction_id: str):
-    """Get detailed health analysis for a prediction"""
-    if prediction_id not in predictions_store:
-        raise HTTPException(status_code=404, detail="Prediction not found")
-    
-    prediction_data = predictions_store[prediction_id]
-    health_assessment = prediction_data['health_assessment']
-    
-    return {
-        'prediction_id': prediction_id,
-        'timestamp': prediction_data['timestamp'],
-        'plant_species': prediction_data.get('plant_species'),
-        'location': prediction_data.get('location'),
-        'overall_health': float(health_assessment.overall_health),
-        'detailed_scores': {
-            'disease_score': float(health_assessment.disease_score),
-            'pest_score': float(health_assessment.pest_score),
-            'environmental_score': float(health_assessment.environmental_score)
-        },
-        'risk_level': health_assessment.risk_level,
-        'confidence': float(health_assessment.confidence),
-        'detected_issues': [
-            {
-                'class_name': d.class_name,
-                'confidence': float(d.confidence),
-                'bbox': tuple(float(x) for x in d.bbox),
-                'severity': getattr(d, 'severity', 'unknown')
-            } for d in health_assessment.detected_issues
-        ],
-        'disease_classification': prediction_data.get('disease_classification', {}),
-        'environmental_analysis': health_assessment.sensor_analysis,
-        'recommendations': health_assessment.recommendations,
-        'sensor_data': prediction_data.get('sensor_data')
-    }
+# New endpoint for plant identification only
+@app.post("/identify-plant")
+async def identify_plant_species(
+    image: UploadFile = File(...),
+    organs: Optional[str] = "auto",  # Changed from "leaf" to "auto"
+    nb_results: int = 5
+):
+    """Identify plant species from image"""
+    try:
+        if not plantnet_api.api_key:
+            raise HTTPException(status_code=503, detail="PlantNet API not configured")
+        
+        # Validate image
+        if not image.content_type.startswith('image/'):
+            raise HTTPException(status_code=400, detail="File must be an image")
+        
+        # Read image
+        image_data = await image.read()
+        
+        # Parse organs - handle 'auto' as single organ
+        if organs == "auto":
+            organ_list = ["auto"]
+        else:
+            organ_list = [organ.strip() for organ in organs.split(",")]
+        
+        logger.info(f"Identifying plant with organs: {organ_list}")
+        
+        # Identify plant
+        result = plantnet_api.identify_plant(
+            image_data, 
+            organs=organ_list,
+            nb_results=nb_results
+        )
+        
+        if not result:
+            # Return a structured error response instead of raising exception
+            return {
+                'success': False,
+                'error': 'Plant identification service unavailable',
+                'species_count': 0,
+                'best_match': None,
+                'all_results': [],
+                'query_info': {
+                    'error': 'API service unavailable'
+                }
+            }
+        
+        return {
+            'success': result.get('success', False),
+            'species_count': result['species_count'],
+            'best_match': result['best_match'],
+            'all_results': result['all_results'][:nb_results],
+            'query_info': result['query_info']
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Plant identification error: {e}")
+        return {
+            'success': False,
+            'error': f"Identification failed: {str(e)}",
+            'species_count': 0,
+            'best_match': None,
+            'all_results': [],
+            'query_info': {
+                'error': str(e)
+            }
+        }
 
 
-# Get farming advice
+# Get detailed advice
 @app.get("/advice/{prediction_id}")
 async def get_farming_advice(prediction_id: str):
     """Get detailed farming advice for a prediction"""
@@ -370,41 +351,61 @@ async def get_farming_advice(prediction_id: str):
     
     prediction_data = predictions_store[prediction_id]
     health_assessment = prediction_data['health_assessment']
+    plant_identification = prediction_data.get('plant_identification')
     
-    # Generate comprehensive advice (this could be enhanced with RAG/LLM)
     advice = {
         'prediction_id': prediction_id,
-        'plant_species': prediction_data.get('plant_species'),
-        'health_summary': {
-            'overall_health': health_assessment.overall_health,
-            'risk_level': health_assessment.risk_level,
-            'primary_concerns': [d.class_name for d in health_assessment.detected_issues[:3]]
-        },
-        'immediate_actions': health_assessment.recommendations[:5],
-        'long_term_care': [
-            "Monitor plant health regularly",
-            "Maintain optimal environmental conditions",
-            "Follow integrated pest management practices",
-            "Ensure proper nutrition and water management"
-        ],
-        'prevention_tips': [
-            "Inspect plants weekly for early signs of problems",
-            "Maintain good air circulation",
-            "Avoid overhead watering when possible",
-            "Practice crop rotation if applicable",
-            "Keep growing area clean and free of debris"
-        ],
-        'next_inspection': "Recommended in 3-7 days" if health_assessment.risk_level in ['high', 'critical'] else "Recommended in 1-2 weeks"
+        'overall_health': health_assessment.overall_health,
+        'risk_level': health_assessment.risk_level,
+        'immediate_actions': health_assessment.recommendations,
+        'general_care': [
+            "Monitor plants regularly",
+            "Maintain proper watering schedule",
+            "Ensure good air circulation",
+            "Practice crop rotation when possible"
+        ]
     }
     
+    # Add plant-specific advice
+    if plant_identification:
+        advice['plant_species'] = {
+            'scientific_name': plant_identification.scientific_name,
+            'common_name': plant_identification.primary_common_name,
+            'family': plant_identification.family,
+            'confidence': plant_identification.confidence
+        }
+    
+    # Get enhanced advice for primary disease
+    if health_assessment.detected_issues:
+        primary_disease = health_assessment.detected_issues[0]['class_name']
+        enhanced_advice = rag_agent.get_disease_advice(primary_disease)
+        
+        advice['enhanced_advice'] = {
+            'disease': enhanced_advice['disease_name'],
+            'detailed_summary': enhanced_advice['summary'],
+            'confidence': enhanced_advice['confidence']
+        }
+    
     return advice
+
+
+# Disease-specific advice
+@app.get("/disease-advice/{disease_name}")
+async def get_disease_advice(disease_name: str):
+    """Get advice for specific disease"""
+    try:
+        advice = rag_agent.get_disease_advice(disease_name)
+        return advice
+    except Exception as e:
+        logger.error(f"Disease advice error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get advice")
 
 
 # List recent predictions
 @app.get("/predictions")
 async def list_predictions(limit: int = 20):
     """List recent predictions"""
-    recent_predictions = sorted(
+    recent = sorted(
         predictions_store.values(),
         key=lambda x: x['timestamp'],
         reverse=True
@@ -415,46 +416,111 @@ async def list_predictions(limit: int = 20):
             {
                 'prediction_id': p['prediction_id'],
                 'timestamp': p['timestamp'],
-                'plant_species': p.get('plant_species'),
                 'overall_health': p['health_assessment'].overall_health,
                 'risk_level': p['health_assessment'].risk_level,
-                'location': p.get('location')
-            } for p in recent_predictions
-        ],
-        'total': len(predictions_store)
+                'plant_species': p.get('plant_identification').primary_common_name if p.get('plant_identification') else None
+            } for p in recent
+        ]
     }
 
 
-# Background task for logging
-async def log_prediction(prediction_data: Dict[str, Any]):
-    """Log prediction data for analysis and record keeping"""
+# Test PlantNet API configuration
+@app.get("/test-plantnet")
+async def test_plantnet_api():
+    """Test PlantNet API configuration"""
+    from utils.plantnet_api import test_plantnet_integration
+    
+    if not plantnet_api.api_key:
+        return {
+            "status": "error",
+            "message": "PlantNet API key not configured",
+            "api_key_configured": False
+        }
+    
+    return {
+        "status": "testing",
+        "message": "Check server logs for detailed test results",
+        "api_key_configured": True,
+        "api_key_preview": plantnet_api.api_key[:10] + "...",
+        "project": plantnet_api.project,
+        "base_url": plantnet_api.base_url
+    }
+
+
+# Add dataset information endpoint
+@app.get("/dataset-info")
+async def get_dataset_info():
+    """Get information about the current dataset"""
     try:
-        log_entry = {
-            'timestamp': prediction_data['timestamp'],
-            'prediction_id': prediction_data['prediction_id'],
-            'plant_species': prediction_data.get('plant_species'),
-            'location': prediction_data.get('location'),
-            'health_score': prediction_data['health_assessment'].overall_health,
-            'risk_level': prediction_data['health_assessment'].risk_level,
-            'detected_issues_count': len(prediction_data['health_assessment'].detected_issues),
-            'sensor_data_available': prediction_data.get('sensor_data') is not None
+        consolidated_yaml = CONSOLIDATED_DATASET_DIR / "data.yaml"
+        original_yaml = DATASET_DIR / "data.yaml"
+        
+        info = {
+            "consolidated_available": consolidated_yaml.exists(),
+            "original_available": original_yaml.exists(),
+            "active_dataset": "none"
         }
         
-        # In production, this would write to a database
-        log_file = LOG_FILE.parent / "predictions.jsonl"
-        with open(log_file, 'a') as f:
-            f.write(json.dumps(log_entry) + '\n')
-            
+        # Get information about consolidated dataset
+        if consolidated_yaml.exists():
+            info["active_dataset"] = "consolidated"
+            try:
+                import yaml
+                with open(consolidated_yaml, 'r') as f:
+                    data = yaml.safe_load(f)
+                
+                info["consolidated"] = {
+                    "classes": data.get('nc', 0),
+                    "class_names": data.get('names', [])[:20],  # First 20 classes
+                    "total_class_names": len(data.get('names', []))
+                }
+                
+                # Get consolidation statistics
+                mapping_file = CONSOLIDATED_DATASET_DIR / "consolidation_mapping.json"
+                if mapping_file.exists():
+                    with open(mapping_file, 'r') as f:
+                        mapping_data = json.load(f)
+                    
+                    info["consolidation"] = {
+                        "original_classes": len(mapping_data.get('original_classes', [])),
+                        "consolidated_classes": len(mapping_data.get('consolidated_classes', [])),
+                        "reduction_percentage": round(
+                            (len(mapping_data.get('original_classes', [])) - 
+                             len(mapping_data.get('consolidated_classes', []))) / 
+                            len(mapping_data.get('original_classes', [])) * 100, 1
+                        ) if mapping_data.get('original_classes') else 0,
+                        "statistics": mapping_data.get('statistics', {})
+                    }
+            except Exception as e:
+                logger.error(f"Error reading consolidated dataset: {e}")
+        
+        # Get information about original dataset
+        elif original_yaml.exists():
+            info["active_dataset"] = "original"
+            try:
+                import yaml
+                with open(original_yaml, 'r') as f:
+                    data = yaml.safe_load(f)
+                
+                info["original"] = {
+                    "classes": data.get('nc', 0),
+                    "class_names": data.get('names', [])[:20],  # First 20 classes
+                    "total_class_names": len(data.get('names', []))
+                }
+            except Exception as e:
+                logger.error(f"Error reading original dataset: {e}")
+        
+        return info
+        
     except Exception as e:
-        logger.error(f"Failed to log prediction: {e}")
+        logger.error(f"Error getting dataset info: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get dataset information")
 
 
-# Development server runner
 if __name__ == "__main__":
     uvicorn.run(
         "main:app",
         host=API_HOST,
         port=API_PORT,
-        reload=True,
-        log_level="info"
+        reload=True
     )

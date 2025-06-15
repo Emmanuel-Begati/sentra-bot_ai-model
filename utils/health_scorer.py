@@ -1,364 +1,298 @@
 """
-Crop Health Scoring System
-Calculates comprehensive health percentage based on disease detection and environmental factors
+Simplified Crop Health Scoring System
 """
 
 import logging
-from typing import Dict, List, Tuple, Optional
-from dataclasses import dataclass
 import numpy as np
+from typing import Dict, List, Optional
+from dataclasses import dataclass
 
-from config import HEALTH_WEIGHTS, OPTIMAL_RANGES
+from config import OPTIMAL_RANGES, DISEASE_IMPACT_WEIGHTS
+from .disease_classifier import DiseaseClassifier
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class DetectionResult:
-    """Structure for disease/pest detection results"""
     class_name: str
     confidence: float
-    bbox: Tuple[float, float, float, float]  # x, y, w, h (normalized)
-    severity: str = "unknown"  # low, medium, high
+    bbox: tuple
+    area: float = 0.0
 
 
 @dataclass
 class SensorData:
-    """Structure for environmental sensor data"""
-    temperature: Optional[float] = None  # Celsius
-    humidity: Optional[float] = None     # Percentage
-    soil_moisture: Optional[float] = None  # Percentage
-    ph: Optional[float] = None           # pH scale
-    light_intensity: Optional[float] = None  # Lux
-    timestamp: Optional[str] = None
+    temperature: Optional[float] = None
+    humidity: Optional[float] = None
+    soil_moisture: Optional[float] = None
+    ph: Optional[float] = None
 
 
 @dataclass
 class HealthAssessment:
-    """Complete health assessment result"""
-    overall_health: float  # 0-100%
-    disease_score: float   # 0-100%
-    pest_score: float      # 0-100%
-    environmental_score: float  # 0-100%
-    confidence: float      # 0-100%
-    risk_level: str        # low, medium, high, critical
+    overall_health: float
+    disease_score: float
+    environmental_score: float
+    risk_level: str
+    confidence: float
     recommendations: List[str]
-    detected_issues: List[DetectionResult]
+    detected_issues: List[Dict]
     sensor_analysis: Dict
 
 
+def convert_numpy_types(obj):
+    """Convert numpy types to Python native types for JSON serialization"""
+    if isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, dict):
+        return {key: convert_numpy_types(value) for key, value in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_numpy_types(item) for item in obj]
+    elif isinstance(obj, tuple):
+        return tuple(convert_numpy_types(item) for item in obj)
+    return obj
+
+
 class HealthScorer:
-    """Calculates crop health scores based on multiple factors"""
+    """Simplified health scorer using disease classifier"""
     
     def __init__(self):
-        self.disease_classes = self._load_disease_classes()
-        self.pest_classes = self._load_pest_classes()
+        self.disease_classifier = DiseaseClassifier()
     
     def calculate_health_score(self, 
                              detections: List[DetectionResult],
-                             sensor_data: SensorData,
-                             plant_species: str = None) -> HealthAssessment:
-        """
-        Calculate comprehensive health score
+                             sensor_data: Optional[SensorData] = None) -> HealthAssessment:
+        """Calculate comprehensive health score"""
         
-        Args:
-            detections: List of detected diseases/pests
-            sensor_data: Environmental sensor readings
-            plant_species: Identified plant species (for species-specific scoring)
-            
-        Returns:
-            Complete health assessment
-        """
-        try:
-            # Separate diseases and pests
-            diseases = [d for d in detections if self._is_disease(d.class_name)]
-            pests = [d for d in detections if self._is_pest(d.class_name)]
-            
-            # Calculate individual scores
-            disease_score = self._calculate_disease_score(diseases)
-            pest_score = self._calculate_pest_score(pests)
-            env_score = self._calculate_environmental_score(sensor_data, plant_species)
-            
-            # Calculate weighted overall health
-            weights = HEALTH_WEIGHTS
-            overall_health = (
-                disease_score * weights['disease_score'] +
-                pest_score * weights['pest_score'] +
-                env_score * weights['environmental']
-            )
-            
-            # Ensure score is between 0-100
-            overall_health = max(0, min(100, overall_health))
-            
-            # Determine risk level and confidence
-            risk_level = self._determine_risk_level(overall_health, detections)
-            confidence = self._calculate_confidence(detections, sensor_data)
-            
-            # Generate recommendations
-            recommendations = self._generate_recommendations(
-                diseases, pests, sensor_data, overall_health, plant_species
-            )
-            
-            # Analyze sensor data
-            sensor_analysis = self._analyze_sensor_data(sensor_data)
-            
-            return HealthAssessment(
-                overall_health=round(overall_health, 1),
-                disease_score=round(disease_score, 1),
-                pest_score=round(pest_score, 1),
-                environmental_score=round(env_score, 1),
-                confidence=round(confidence, 1),
-                risk_level=risk_level,
-                recommendations=recommendations,
-                detected_issues=detections,
-                sensor_analysis=sensor_analysis
-            )
-            
-        except Exception as e:
-            logger.error(f"Error calculating health score: {e}")
-            return self._create_error_assessment()
+        # Analyze detections
+        disease_analysis = self._analyze_detections(detections)
+        
+        # Calculate scores
+        disease_score = self._calculate_disease_score(disease_analysis)
+        env_score = self._calculate_environmental_score(sensor_data)
+        
+        # Calculate overall health (weighted average)
+        disease_weight = 0.7
+        env_weight = 0.3
+        
+        overall_health = (disease_score * disease_weight + env_score * env_weight)
+        
+        # Determine risk level
+        risk_level = self._determine_risk_level(overall_health, disease_analysis)
+        
+        # Calculate confidence
+        confidence = self._calculate_confidence(detections, sensor_data)
+        
+        # Generate recommendations
+        recommendations = self._generate_recommendations(disease_analysis, sensor_data)
+        
+        # Analyze sensor data
+        sensor_analysis = self._analyze_sensor_data(sensor_data)
+        
+        # Convert all numpy types to Python types
+        classified_detections = convert_numpy_types(disease_analysis['classified_detections'])
+        sensor_analysis = convert_numpy_types(sensor_analysis)
+        
+        return HealthAssessment(
+            overall_health=float(overall_health),
+            disease_score=float(disease_score),
+            environmental_score=float(env_score),
+            risk_level=risk_level,
+            confidence=float(confidence),
+            recommendations=recommendations,
+            detected_issues=classified_detections,
+            sensor_analysis=sensor_analysis
+        )
     
-    def _calculate_disease_score(self, diseases: List[DetectionResult]) -> float:
-        """Calculate disease impact score (100 = healthy, 0 = severely diseased)"""
-        if not diseases:
+    def _analyze_detections(self, detections: List[DetectionResult]) -> Dict:
+        """Analyze detections using disease classifier"""
+        classified_detections = []
+        total_impact = 0.0
+        max_priority = 0
+        total_area = 0.0
+        
+        for detection in detections:
+            classification = self.disease_classifier.classify_detection(
+                detection.class_name, 
+                detection.confidence
+            )
+            
+            classification['area'] = float(detection.area)
+            classified_detections.append(classification)
+            
+            total_impact += classification['weighted_impact']
+            max_priority = max(max_priority, classification['treatment_priority'])
+            total_area += detection.area
+        
+        return {
+            'classified_detections': classified_detections,
+            'total_impact': float(total_impact),
+            'max_priority': int(max_priority),
+            'affected_area': float(total_area),
+            'detection_count': len(detections)
+        }
+    
+    def _calculate_disease_score(self, disease_analysis: Dict) -> float:
+        """Calculate disease score from analysis"""
+        if disease_analysis['detection_count'] == 0:
             return 100.0
         
-        total_impact = 0.0
-        max_impact = 0.0
+        # Base impact from diseases
+        base_impact = disease_analysis['total_impact'] / disease_analysis['detection_count']
         
-        for disease in diseases:
-            # Base impact based on confidence
-            impact = disease.confidence * 100
-            
-            # Adjust for disease severity
-            severity_multiplier = self._get_severity_multiplier(disease.class_name)
-            impact *= severity_multiplier
-            
-            # Adjust for detection area (larger detections = more impact)
-            area = disease.bbox[2] * disease.bbox[3]  # width * height
-            area_multiplier = min(2.0, 1.0 + area)  # Cap at 2x multiplier
-            impact *= area_multiplier
-            
-            total_impact += impact
-            max_impact = max(max_impact, impact)
+        # Area penalty
+        area_penalty = min(30, disease_analysis['affected_area'] * 100)
         
-        # Use combination of average and maximum impact
-        avg_impact = total_impact / len(diseases)
-        combined_impact = (avg_impact + max_impact) / 2
+        # Priority penalty
+        priority_penalty = disease_analysis['max_priority'] * 5
         
-        # Convert to health score (inverse)
-        health_score = max(0, 100 - min(100, combined_impact))
+        total_penalty = base_impact + area_penalty + priority_penalty
+        disease_score = max(0, 100 - total_penalty)
         
-        return health_score
+        return float(disease_score)
     
-    def _calculate_pest_score(self, pests: List[DetectionResult]) -> float:
-        """Calculate pest impact score (100 = no pests, 0 = severe infestation)"""
-        if not pests:
-            return 100.0
-        
-        total_impact = 0.0
-        
-        for pest in pests:
-            # Base impact
-            impact = pest.confidence * 100
-            
-            # Pest-specific severity
-            severity_multiplier = self._get_pest_severity(pest.class_name)
-            impact *= severity_multiplier
-            
-            # Area impact
-            area = pest.bbox[2] * pest.bbox[3]
-            area_multiplier = min(1.5, 1.0 + area * 0.5)
-            impact *= area_multiplier
-            
-            total_impact += impact
-        
-        # Average impact
-        avg_impact = total_impact / len(pests)
-        
-        # Convert to health score
-        health_score = max(0, 100 - min(100, avg_impact))
-        
-        return health_score
-    
-    def _calculate_environmental_score(self, 
-                                     sensor_data: SensorData, 
-                                     plant_species: str = None) -> float:
-        """Calculate environmental conditions score"""
+    def _calculate_environmental_score(self, sensor_data: Optional[SensorData]) -> float:
+        """Calculate environmental score"""
         if not sensor_data:
-            return 50.0  # Neutral score if no data
+            return 75.0  # Default score when no sensor data
         
         scores = []
         
-        # Temperature score
-        if sensor_data.temperature is not None:
-            temp_score = self._score_parameter(
-                sensor_data.temperature, 
-                OPTIMAL_RANGES['temperature']
-            )
-            scores.append(temp_score)
+        for param, optimal_range in OPTIMAL_RANGES.items():
+            value = getattr(sensor_data, param, None)
+            if value is not None:
+                score = self._score_parameter(value, optimal_range)
+                scores.append(score)
         
-        # Humidity score
-        if sensor_data.humidity is not None:
-            humidity_score = self._score_parameter(
-                sensor_data.humidity,
-                OPTIMAL_RANGES['humidity']
-            )
-            scores.append(humidity_score)
-        
-        # Soil moisture score
-        if sensor_data.soil_moisture is not None:
-            moisture_score = self._score_parameter(
-                sensor_data.soil_moisture,
-                OPTIMAL_RANGES['soil_moisture']
-            )
-            scores.append(moisture_score)
-        
-        # pH score
-        if sensor_data.ph is not None:
-            ph_score = self._score_parameter(
-                sensor_data.ph,
-                OPTIMAL_RANGES['ph']
-            )
-            scores.append(ph_score)
-        
-        # Return average of available scores
-        return np.mean(scores) if scores else 50.0
+        return float(np.mean(scores)) if scores else 75.0
     
-    def _score_parameter(self, value: float, optimal_range: Tuple[float, float]) -> float:
-        """Score a parameter based on optimal range"""
+    def _score_parameter(self, value: float, optimal_range: tuple) -> float:
+        """Score individual parameter"""
         min_val, max_val = optimal_range
+        range_size = max_val - min_val
         
         if min_val <= value <= max_val:
-            return 100.0  # Perfect score
+            return 100.0
         elif value < min_val:
-            # Below optimal - score decreases linearly
-            distance = min_val - value
-            max_distance = min_val * 0.5  # 50% below minimum = 0 score
-            score = max(0, 100 - (distance / max_distance) * 100)
+            deviation = (min_val - value) / range_size
+            return max(0, 100 - deviation * 100)
         else:
-            # Above optimal - score decreases linearly
-            distance = value - max_val
-            max_distance = max_val * 0.5  # 50% above maximum = 0 score
-            score = max(0, 100 - (distance / max_distance) * 100)
-        
-        return score
+            deviation = (value - max_val) / range_size
+            return max(0, 100 - deviation * 100)
     
-    def _determine_risk_level(self, health_score: float, detections: List[DetectionResult]) -> str:
-        """Determine risk level based on health score and detections"""
+    def _determine_risk_level(self, health_score: float, disease_analysis: Dict) -> str:
+        """Determine risk level"""
         if health_score >= 80:
-            return "low"
+            risk = "low"
         elif health_score >= 60:
-            return "medium" 
+            risk = "medium"
         elif health_score >= 30:
-            return "high"
+            risk = "high"
         else:
-            return "critical"
+            risk = "critical"
+        
+        # Upgrade risk for urgent conditions
+        if disease_analysis['max_priority'] >= 4:
+            if risk == "low":
+                risk = "medium"
+            elif risk == "medium":
+                risk = "high"
+        
+        return risk
     
-    def _calculate_confidence(self, detections: List[DetectionResult], sensor_data: SensorData) -> float:
-        """Calculate confidence in the health assessment"""
+    def _calculate_confidence(self, detections: List[DetectionResult], 
+                            sensor_data: Optional[SensorData]) -> float:
+        """Calculate confidence in assessment"""
         confidence_factors = []
         
         # Detection confidence
         if detections:
-            avg_detection_confidence = np.mean([d.confidence for d in detections]) * 100
-            confidence_factors.append(avg_detection_confidence)
+            avg_confidence = np.mean([d.confidence for d in detections]) * 100
+            confidence_factors.append(avg_confidence)
         else:
-            confidence_factors.append(90.0)  # High confidence if no detections
+            confidence_factors.append(90.0)  # High confidence if no issues detected
         
         # Sensor data availability
-        sensor_availability = 0
-        total_sensors = 4  # temp, humidity, soil_moisture, ph
-        
         if sensor_data:
-            if sensor_data.temperature is not None: sensor_availability += 1
-            if sensor_data.humidity is not None: sensor_availability += 1  
-            if sensor_data.soil_moisture is not None: sensor_availability += 1
-            if sensor_data.ph is not None: sensor_availability += 1
+            available_sensors = sum(1 for param in ['temperature', 'humidity', 'soil_moisture', 'ph']
+                                  if getattr(sensor_data, param, None) is not None)
+            sensor_confidence = (available_sensors / 4) * 100
+            confidence_factors.append(sensor_confidence)
+        else:
+            confidence_factors.append(50.0)  # Moderate confidence without sensors
         
-        sensor_confidence = (sensor_availability / total_sensors) * 100
-        confidence_factors.append(sensor_confidence)
-        
-        return np.mean(confidence_factors)
+        return float(np.mean(confidence_factors))
     
-    def _generate_recommendations(self, 
-                                diseases: List[DetectionResult],
-                                pests: List[DetectionResult],
-                                sensor_data: SensorData,
-                                health_score: float,
-                                plant_species: str = None) -> List[str]:
-        """Generate actionable recommendations"""
+    def _generate_recommendations(self, disease_analysis: Dict, 
+                                sensor_data: Optional[SensorData]) -> List[str]:
+        """Generate prioritized recommendations"""
         recommendations = []
         
         # Disease-specific recommendations
-        if diseases:
-            disease_names = [d.class_name for d in diseases]
-            if any('blight' in name.lower() for name in disease_names):
-                recommendations.append("Apply fungicide treatment for blight control")
-                recommendations.append("Improve air circulation around plants")
-            if any('spot' in name.lower() for name in disease_names):
-                recommendations.append("Remove affected leaves and destroy them")
-                recommendations.append("Avoid overhead watering")
-            if any('rust' in name.lower() for name in disease_names):
-                recommendations.append("Apply copper-based fungicide")
-                recommendations.append("Ensure good drainage")
-        
-        # Pest-specific recommendations
-        if pests:
-            pest_names = [p.class_name for p in pests]
-            if any('mite' in name.lower() for name in pest_names):
-                recommendations.append("Increase humidity around plants")
-                recommendations.append("Apply miticide or insecticidal soap")
-            if any('aphid' in name.lower() for name in pest_names):
-                recommendations.append("Use beneficial insects like ladybugs")
-                recommendations.append("Apply neem oil treatment")
+        for detection in disease_analysis['classified_detections'][:3]:  # Top 3 issues
+            disease_recs = self.disease_classifier.get_treatment_recommendations(
+                detection['class_name']
+            )
+            recommendations.extend(disease_recs[:2])  # Top 2 per disease
         
         # Environmental recommendations
         if sensor_data:
-            if sensor_data.temperature is not None:
-                temp_range = OPTIMAL_RANGES['temperature']
-                if sensor_data.temperature < temp_range[0]:
-                    recommendations.append("Increase temperature - consider protective covering")
-                elif sensor_data.temperature > temp_range[1]:
-                    recommendations.append("Provide shade or cooling - temperature too high")
-            
-            if sensor_data.humidity is not None:
-                humidity_range = OPTIMAL_RANGES['humidity']
-                if sensor_data.humidity < humidity_range[0]:
-                    recommendations.append("Increase humidity around plants")
-                elif sensor_data.humidity > humidity_range[1]:
-                    recommendations.append("Improve ventilation - humidity too high")
-            
-            if sensor_data.soil_moisture is not None:
-                moisture_range = OPTIMAL_RANGES['soil_moisture']
-                if sensor_data.soil_moisture < moisture_range[0]:
-                    recommendations.append("Increase watering frequency")
-                elif sensor_data.soil_moisture > moisture_range[1]:
-                    recommendations.append("Reduce watering - soil too wet")
+            env_recs = self._get_environmental_recommendations(sensor_data)
+            recommendations.extend(env_recs)
         
-        # General health recommendations
-        if health_score < 50:
-            recommendations.append("Schedule immediate inspection by agricultural expert")
-            recommendations.append("Consider soil testing for nutrient deficiencies")
-        elif health_score < 70:
-            recommendations.append("Monitor closely and take preventive measures")
-            recommendations.append("Ensure proper nutrition and water management")
+        # General recommendations
+        if disease_analysis['max_priority'] >= 3:
+            recommendations.append("Schedule follow-up inspection within 3-5 days")
         
-        return recommendations[:8]  # Limit to 8 recommendations
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_recs = []
+        for rec in recommendations:
+            if rec not in seen:
+                seen.add(rec)
+                unique_recs.append(rec)
+        
+        return unique_recs[:8]  # Limit to 8 recommendations
     
-    def _analyze_sensor_data(self, sensor_data: SensorData) -> Dict:
-        """Analyze sensor data and provide detailed breakdown"""
-        analysis = {
-            'temperature': {'value': None, 'status': 'unknown', 'score': None},
-            'humidity': {'value': None, 'status': 'unknown', 'score': None},
-            'soil_moisture': {'value': None, 'status': 'unknown', 'score': None},
-            'ph': {'value': None, 'status': 'unknown', 'score': None}
-        }
+    def _get_environmental_recommendations(self, sensor_data: SensorData) -> List[str]:
+        """Get environmental recommendations"""
+        recommendations = []
+        
+        if sensor_data.temperature is not None:
+            temp_range = OPTIMAL_RANGES['temperature']
+            if sensor_data.temperature < temp_range[0]:
+                recommendations.append("Provide protection from cold temperatures")
+            elif sensor_data.temperature > temp_range[1]:
+                recommendations.append("Provide shade or cooling measures")
+        
+        if sensor_data.humidity is not None:
+            humidity_range = OPTIMAL_RANGES['humidity']
+            if sensor_data.humidity < humidity_range[0]:
+                recommendations.append("Increase humidity around plants")
+            elif sensor_data.humidity > humidity_range[1]:
+                recommendations.append("Improve ventilation to reduce humidity")
+        
+        if sensor_data.soil_moisture is not None:
+            moisture_range = OPTIMAL_RANGES['soil_moisture']
+            if sensor_data.soil_moisture < moisture_range[0]:
+                recommendations.append("Increase watering frequency")
+            elif sensor_data.soil_moisture > moisture_range[1]:
+                recommendations.append("Reduce watering to prevent root rot")
+        
+        return recommendations
+    
+    def _analyze_sensor_data(self, sensor_data: Optional[SensorData]) -> Dict:
+        """Analyze sensor data for response"""
+        analysis = {}
         
         if not sensor_data:
             return analysis
         
-        # Analyze each parameter
         for param, optimal_range in OPTIMAL_RANGES.items():
             value = getattr(sensor_data, param, None)
             if value is not None:
@@ -368,91 +302,14 @@ class HealthScorer:
                     status = 'optimal'
                 elif score >= 60:
                     status = 'acceptable'
-                elif score >= 40:
-                    status = 'suboptimal'
                 else:
                     status = 'poor'
                 
                 analysis[param] = {
-                    'value': value,
+                    'value': float(value),
                     'status': status,
-                    'score': round(score, 1),
+                    'score': float(score),
                     'optimal_range': optimal_range
                 }
         
         return analysis
-    
-    def _load_disease_classes(self) -> List[str]:
-        """Load known disease class names"""
-        return [
-            'bacterial spot', 'bacterial blight', 'bacterial wilt',
-            'early blight', 'late blight', 'leaf blight',
-            'black rot', 'brown rot', 'soft rot',
-            'rust', 'leaf rust', 'stem rust',
-            'powdery mildew', 'downy mildew',
-            'anthracnose', 'scab', 'canker',
-            'mosaic virus', 'curl virus', 'yellow virus',
-            'leaf spot', 'target spot', 'septoria leaf spot',
-            'leaf mold', 'gray mold', 'white mold'
-        ]
-    
-    def _load_pest_classes(self) -> List[str]:
-        """Load known pest class names"""
-        return [
-            'spider mite', 'aphid', 'whitefly',
-            'thrips', 'scale', 'mealybug',
-            'caterpillar', 'cutworm', 'army worm',
-            'leaf miner', 'borer', 'weevil'
-        ]
-    
-    def _is_disease(self, class_name: str) -> bool:
-        """Check if detection is a disease"""
-        class_lower = class_name.lower()
-        return any(disease in class_lower for disease in self.disease_classes)
-    
-    def _is_pest(self, class_name: str) -> bool:
-        """Check if detection is a pest"""
-        class_lower = class_name.lower()
-        return any(pest in class_lower for pest in self.pest_classes)
-    
-    def _get_severity_multiplier(self, disease_name: str) -> float:
-        """Get severity multiplier for specific diseases"""
-        disease_lower = disease_name.lower()
-        
-        # High severity diseases
-        if any(term in disease_lower for term in ['blight', 'wilt', 'rot', 'canker']):
-            return 1.5
-        # Medium severity
-        elif any(term in disease_lower for term in ['rust', 'mildew', 'virus']):
-            return 1.2
-        # Lower severity
-        else:
-            return 1.0
-    
-    def _get_pest_severity(self, pest_name: str) -> float:
-        """Get severity multiplier for specific pests"""
-        pest_lower = pest_name.lower()
-        
-        # High damage pests
-        if any(term in pest_lower for term in ['borer', 'cutworm', 'army worm']):
-            return 1.4
-        # Medium damage
-        elif any(term in pest_lower for term in ['aphid', 'thrips', 'whitefly']):
-            return 1.2
-        # Lower damage
-        else:
-            return 1.0
-    
-    def _create_error_assessment(self) -> HealthAssessment:
-        """Create a default assessment for error cases"""
-        return HealthAssessment(
-            overall_health=50.0,
-            disease_score=50.0,
-            pest_score=50.0,
-            environmental_score=50.0,
-            confidence=0.0,
-            risk_level="unknown",
-            recommendations=["Unable to assess health - please check inputs"],
-            detected_issues=[],
-            sensor_analysis={}
-        )
