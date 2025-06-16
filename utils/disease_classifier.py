@@ -42,31 +42,20 @@ class DiseaseInfo:
 
 
 class DiseaseClassifier:
-    """Classifies diseases based on consolidated classes and provides severity assessment"""
+    """Classifies diseases based on dataset classes and provides severity assessment"""
     
     def __init__(self):
         self.disease_classes = self._load_disease_classes()
         self.disease_db = self._build_disease_database()
-        self.consolidation_mapping = self._load_consolidation_mapping()
     
     def _load_disease_classes(self) -> List[str]:
-        """Load disease classes from consolidated data.yaml"""
+        """Load disease classes from data.yaml"""
         try:
-            # Try consolidated dataset first
-            consolidated_yaml = Path(__file__).parent.parent / "data" / "consolidated" / "data.yaml"
-            if consolidated_yaml.exists():
-                with open(consolidated_yaml, 'r') as f:
-                    data = yaml.safe_load(f)
-                classes = data.get('names', [])
-                logger.info(f"Loaded {len(classes)} consolidated disease classes")
-                return classes
-            
-            # Fallback to original data.yaml
             if DATA_YAML_PATH.exists():
                 with open(DATA_YAML_PATH, 'r') as f:
                     data = yaml.safe_load(f)
                 classes = data.get('names', [])
-                logger.info(f"Loaded {len(classes)} original disease classes")
+                logger.info(f"Loaded {len(classes)} disease classes")
                 return classes
             else:
                 logger.warning("No data.yaml found, using default classes")
@@ -74,19 +63,6 @@ class DiseaseClassifier:
         except Exception as e:
             logger.error(f"Error loading disease classes: {e}")
             return self._get_default_classes()
-    
-    def _load_consolidation_mapping(self) -> Dict:
-        """Load consolidation mapping if available"""
-        try:
-            mapping_file = Path(__file__).parent.parent / "data" / "consolidated" / "consolidation_mapping.json"
-            if mapping_file.exists():
-                with open(mapping_file, 'r') as f:
-                    mapping_data = json.load(f)
-                logger.info("Loaded consolidation mapping")
-                return mapping_data
-        except Exception as e:
-            logger.warning(f"Could not load consolidation mapping: {e}")
-        return {}
     
     def _get_default_classes(self) -> List[str]:
         """Default consolidated disease classes"""

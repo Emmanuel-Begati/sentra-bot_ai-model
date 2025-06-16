@@ -19,7 +19,7 @@ from utils.yolo_inference import YOLOInference
 from utils.health_scorer import HealthScorer, DetectionResult, SensorData
 from utils.rag_agent import SimpleRAGAgent
 from utils.plantnet_api import PlantNetAPI
-from config import API_HOST, API_PORT, CONSOLIDATED_DATASET_DIR, DATASET_DIR
+from config import API_HOST, API_PORT, DATASET_DIR
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -84,29 +84,25 @@ class HealthResponse(BaseModel):
 # Startup event
 @app.on_event("startup")
 async def startup_event():
-    """Initialize services with consolidated dataset support"""
+    """Initialize services"""
     global yolo_inference
     
     try:
-        # Try to load model trained on consolidated dataset first
         yolo_inference = YOLOInference()
         logger.info("YOLO inference initialized")
         
         # Log dataset information
-        consolidated_yaml = CONSOLIDATED_DATASET_DIR / "data.yaml"
-        original_yaml = DATASET_DIR / "data.yaml"
+        data_yaml = DATASET_DIR / "data.yaml"
         
-        if consolidated_yaml.exists():
-            logger.info("✅ Consolidated dataset available")
+        if data_yaml.exists():
+            logger.info("✅ Dataset available")
             try:
                 import yaml
-                with open(consolidated_yaml, 'r') as f:
+                with open(data_yaml, 'r') as f:
                     data = yaml.safe_load(f)
-                logger.info(f"📊 Model trained on {data.get('nc', 'unknown')} consolidated classes")
+                logger.info(f"📊 Model trained on {data.get('nc', 'unknown')} classes")
             except Exception as e:
-                logger.warning(f"Could not read consolidated dataset info: {e}")
-        elif original_yaml.exists():
-            logger.info("⚠️ Using original dataset (consider consolidation)")
+                logger.warning(f"Could not read dataset info: {e}")
         else:
             logger.warning("❌ No dataset configuration found")
             
@@ -121,28 +117,17 @@ async def startup_event():
         logger.warning("PlantNet API key not configured")
 
 
-# Health check with dataset info
+# Health check
 @app.get("/health")
 async def health_check():
-    """API health check with dataset information"""
+    """API health check"""
     # Check dataset status
     dataset_info = {
-        "consolidated_available": (CONSOLIDATED_DATASET_DIR / "data.yaml").exists(),
-        "original_available": (DATASET_DIR / "data.yaml").exists(),
-        "type": "unknown"
+        "available": (DATASET_DIR / "data.yaml").exists(),
+        "type": "standard"
     }
     
-    if dataset_info["consolidated_available"]:
-        dataset_info["type"] = "consolidated"
-        try:
-            import yaml
-            with open(CONSOLIDATED_DATASET_DIR / "data.yaml", 'r') as f:
-                data = yaml.safe_load(f)
-            dataset_info["classes"] = data.get('nc', 0)
-        except:
-            pass
-    elif dataset_info["original_available"]:
-        dataset_info["type"] = "original"
+    if dataset_info["available"]:
         try:
             import yaml
             with open(DATASET_DIR / "data.yaml", 'r') as f:
@@ -452,63 +437,27 @@ async def test_plantnet_api():
 async def get_dataset_info():
     """Get information about the current dataset"""
     try:
-        consolidated_yaml = CONSOLIDATED_DATASET_DIR / "data.yaml"
-        original_yaml = DATASET_DIR / "data.yaml"
+        data_yaml = DATASET_DIR / "data.yaml"
         
         info = {
-            "consolidated_available": consolidated_yaml.exists(),
-            "original_available": original_yaml.exists(),
-            "active_dataset": "none"
+            "available": data_yaml.exists(),
+            "active_dataset": "standard" if data_yaml.exists() else "none"
         }
         
-        # Get information about consolidated dataset
-        if consolidated_yaml.exists():
-            info["active_dataset"] = "consolidated"
+        # Get information about dataset
+        if data_yaml.exists():
             try:
                 import yaml
-                with open(consolidated_yaml, 'r') as f:
+                with open(data_yaml, 'r') as f:
                     data = yaml.safe_load(f)
                 
-                info["consolidated"] = {
-                    "classes": data.get('nc', 0),
-                    "class_names": data.get('names', [])[:20],  # First 20 classes
-                    "total_class_names": len(data.get('names', []))
-                }
-                
-                # Get consolidation statistics
-                mapping_file = CONSOLIDATED_DATASET_DIR / "consolidation_mapping.json"
-                if mapping_file.exists():
-                    with open(mapping_file, 'r') as f:
-                        mapping_data = json.load(f)
-                    
-                    info["consolidation"] = {
-                        "original_classes": len(mapping_data.get('original_classes', [])),
-                        "consolidated_classes": len(mapping_data.get('consolidated_classes', [])),
-                        "reduction_percentage": round(
-                            (len(mapping_data.get('original_classes', [])) - 
-                             len(mapping_data.get('consolidated_classes', []))) / 
-                            len(mapping_data.get('original_classes', [])) * 100, 1
-                        ) if mapping_data.get('original_classes') else 0,
-                        "statistics": mapping_data.get('statistics', {})
-                    }
-            except Exception as e:
-                logger.error(f"Error reading consolidated dataset: {e}")
-        
-        # Get information about original dataset
-        elif original_yaml.exists():
-            info["active_dataset"] = "original"
-            try:
-                import yaml
-                with open(original_yaml, 'r') as f:
-                    data = yaml.safe_load(f)
-                
-                info["original"] = {
+                info["dataset"] = {
                     "classes": data.get('nc', 0),
                     "class_names": data.get('names', [])[:20],  # First 20 classes
                     "total_class_names": len(data.get('names', []))
                 }
             except Exception as e:
-                logger.error(f"Error reading original dataset: {e}")
+                logger.error(f"Error reading dataset: {e}")
         
         return info
         

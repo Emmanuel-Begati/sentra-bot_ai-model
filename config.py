@@ -8,7 +8,6 @@ from pathlib import Path
 # Project paths
 PROJECT_ROOT = Path(__file__).parent
 DATASET_DIR = PROJECT_ROOT / "data"
-CONSOLIDATED_DATASET_DIR = DATASET_DIR / "consolidated"  # New consolidated dataset path
 MODELS_DIR = PROJECT_ROOT / "models"
 TRAINING_DIR = PROJECT_ROOT / "training"
 LOGS_DIR = PROJECT_ROOT / "logs"
@@ -21,21 +20,21 @@ for dir_path in [MODELS_DIR, TRAINING_DIR, LOGS_DIR]:
 ENVIRONMENT = os.getenv("TRAINING_ENVIRONMENT", "laptop")  # laptop or colab
 
 if ENVIRONMENT == "colab":
-    YOLO_MODEL_SIZE = "yolov8s.pt"  # Medium model for Colab
+    YOLO_MODEL_SIZE = "yolov8m.pt"  # Medium model for Colab
     BATCH_SIZE = 32
     EPOCHS = 125
     WORKERS = 8
 else:
-    YOLO_MODEL_SIZE = "yolov8n.pt"  # Nano model for laptop
-    BATCH_SIZE = 16
+    YOLO_MODEL_SIZE = "yolov8m.pt"  # Medium model for laptop
+    BATCH_SIZE = 8  # Reduced for medium model
     EPOCHS = 10
     WORKERS = 4
 
 IMAGE_SIZE = 640
 DEVICE = "cuda" if os.getenv("CUDA_AVAILABLE", "false").lower() == "true" else "cpu"
 
-# Data paths - use consolidated dataset if available, otherwise original
-DATA_YAML_PATH = CONSOLIDATED_DATASET_DIR / "data.yaml" if (CONSOLIDATED_DATASET_DIR / "data.yaml").exists() else DATASET_DIR / "data.yaml"
+# Data paths
+DATA_YAML_PATH = DATASET_DIR / "data.yaml"
 
 # API Keys
 PLANTNET_API_KEY = os.getenv("PLANTNET_API_KEY", "2b10XDHQvxhONByCDVW2nsXsu")

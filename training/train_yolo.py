@@ -20,7 +20,7 @@ import glob
 torch.backends.cudnn.benchmark = True
 
 from config import (
-    CONSOLIDATED_DATASET_DIR, DATASET_DIR, MODELS_DIR, YOLO_MODEL_SIZE, 
+    DATASET_DIR, MODELS_DIR, YOLO_MODEL_SIZE, 
     IMAGE_SIZE, BATCH_SIZE, EPOCHS, DEVICE, TRAINING_CONFIG
 )
 
@@ -89,17 +89,13 @@ def on_train_epoch_end(trainer):
 
 
 class YOLOTrainer:
-    """YOLOv8 model trainer optimized for laptop"""
+    """YOLOv8 model trainer optimized for YOLOv8m"""
     
     def __init__(self, data_yaml_path: str = None, model_size: str = None, resume_from: str = None):
-        # Auto-detect consolidated dataset
+        # Use standard dataset
         if data_yaml_path is None:
-            if (CONSOLIDATED_DATASET_DIR / "data.yaml").exists():
-                data_yaml_path = str(CONSOLIDATED_DATASET_DIR / "data.yaml")
-                logger.info("Using consolidated dataset")
-            else:
-                data_yaml_path = str(DATASET_DIR / "data.yaml")
-                logger.info("Using original dataset")
+            data_yaml_path = str(DATASET_DIR / "data.yaml")
+            logger.info("Using standard dataset")
         
         self.data_yaml_path = Path(data_yaml_path)
         self.model_size = model_size or YOLO_MODEL_SIZE
@@ -113,7 +109,7 @@ class YOLOTrainer:
         self.resume_from = resume_from
         self.last_checkpoint = self._find_last_checkpoint() if resume_from else None
         
-        # Training configuration optimized for laptop
+        # Training configuration optimized for YOLOv8m
         self.config = {
             'model_size': self.model_size,
             'epochs': EPOCHS,
@@ -123,8 +119,7 @@ class YOLOTrainer:
             'data_yaml': str(self.data_yaml_path),
             'timestamp': datetime.now().isoformat(),
             'resume_from': resume_from,
-            'environment': 'laptop',
-            'dataset_type': 'consolidated' if 'consolidated' in str(self.data_yaml_path) else 'original'
+            'environment': 'laptop'
         }
         
         # Validate data yaml exists
@@ -223,18 +218,8 @@ class YOLOTrainer:
             
             print(f"📊 Dataset Information:")
             print(f"   - Classes: {num_classes}")
-            print(f"   - Dataset type: {self.config['dataset_type']}")
             print(f"   - Model: {self.model_size}")
             print(f"   - Sample classes: {class_names[:10]}{'...' if len(class_names) > 10 else ''}")
-            
-            # Show consolidation info if available
-            if self.config['dataset_type'] == 'consolidated':
-                mapping_file = self.data_yaml_path.parent / "consolidation_mapping.json"
-                if mapping_file.exists():
-                    with open(mapping_file, 'r') as f:
-                        mapping_data = json.load(f)
-                    original_classes = len(mapping_data.get('original_classes', []))
-                    print(f"   - Original classes: {original_classes} → {num_classes} (consolidated)")
                     
         except Exception as e:
             logger.warning(f"Could not display dataset info: {e}")
@@ -683,11 +668,11 @@ def parse_arguments():
 
 
 def main():
-    """Main training function optimized for laptop"""
+    """Main training function for YOLOv8m"""
     try:
         args = parse_arguments()
         
-        print("🌱 CROP HEALTH MONITORING - LAPTOP TRAINING PIPELINE")
+        print("🌱 CROP HEALTH MONITORING - YOLOv8m TRAINING PIPELINE")
         print("=" * 60)
         
         # Get current configuration values before override
@@ -695,7 +680,7 @@ def main():
         current_batch_size = BATCH_SIZE
         current_model_size = YOLO_MODEL_SIZE
         
-        print(f"🔧 Optimized for: Laptop training with {current_model_size}")
+        print(f"🔧 Training with: {current_model_size}")
         
         # Override config with command line arguments
         if args.epochs:
@@ -718,19 +703,14 @@ def main():
         
         print("=" * 60)
         
-        # Check for consolidated dataset
+        # Check for dataset
         with tqdm(desc="🔍 Checking dataset", unit="step") as pbar:
-            consolidated_yaml = CONSOLIDATED_DATASET_DIR / "data.yaml"
-            original_yaml = DATASET_DIR / "data.yaml"
+            data_yaml = DATASET_DIR / "data.yaml"
             
-            if consolidated_yaml.exists():
-                data_yaml = consolidated_yaml
-                print("✅ Using consolidated dataset")
-            elif original_yaml.exists():
-                data_yaml = original_yaml
-                print("⚠️ Using original dataset (run consolidation for better results)")
+            if data_yaml.exists():
+                print("✅ Using dataset")
             else:
-                logger.error("No dataset found. Please run dataset consolidation first.")
+                logger.error("No dataset found. Please ensure data.yaml exists in data directory.")
                 return 1
             pbar.update(1)
         
@@ -759,7 +739,7 @@ def main():
         exported = trainer.export_model(best_model_path, formats=['onnx'])
         
         # Print final summary
-        print("\n🎉 LAPTOP TRAINING COMPLETED!")
+        print("\n🎉 YOLOv8m TRAINING COMPLETED!")
         print("=" * 60)
         print(f"📁 Best model: {best_model_path}")
         print(f"📊 mAP50: {metrics.get('mAP50', 'N/A'):.4f}")
